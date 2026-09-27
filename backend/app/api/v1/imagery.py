@@ -15,13 +15,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from geoalchemy2.shape import to_shape
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import cache_key, cached_json
 from app.core.config import Settings, get_settings
+from app.db.models import WaterBody
+from app.db.session import get_session
 from app.schemas.imagery import ImageryStatus, LiveImageryOut, LiveVisOut
 from app.services.l03_ingestion import gee
 
@@ -158,3 +162,37 @@ async def live_imagery(
     key = cache_key(*gee.live_map_cache_parts(box, **params))
     value, hit = await cached_json(key, produce, settings=ttl_settings)
     return LiveImageryOut.model_validate({**value, "cached": hit})
+
+
+@router.get(
+    "/thumbnail",
+    response_class=Response,
+    responses={200: {"content": {"image/png": {}}}},
+)
+async def imagery_thumbnail(
+    water_body_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    date_on: Annotated[date | None, Query(alias="date", description="default: today")] = None,
+    px: Annotated[int, Query(ge=128, le=1024)] = 640,
+) -> Response:
+    """A single true-colour Sentinel-2 PNG over the water body's own bbox on
+    ``date`` -- one static image, unlike ``/imagery/live``'s XYZ tile
+    template, so callers that just want a picture (the Telegram bot's status
+    card) don't need a tile server round trip. Reuses the same
+    ``gee.truecolor_thumbnail`` the PDF report renders with."""
+    _require_enabled(settings)
+    wb = await session.get(WaterBody, water_body_id)
+    if wb is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"water body {water_body_id!r} not found")
+    bbox = tuple(round(v, 6) for v in to_shape(wb.geom).bounds)
+    day = date_on or datetime.now(UTC).date()
+    try:
+        png = await asyncio.to_thread(
+            gee.truecolor_thumbnail, bbox, day, px=px, settings=settings
+        )
+    except gee.GEEError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)[:500]) from exc
+    if png is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"no Sentinel-2 pass on {day}")
+    return Response(content=png, media_type="image/png")

@@ -56,6 +56,7 @@ def create_job(
     date_from: date,
     date_to: date,
     requested_by: str | None,
+    max_scenes: int | None = None,
 ) -> Job:
     if session.get(WaterBody, water_body_id) is None:
         raise LookupError(f"unknown water body {water_body_id!r}")
@@ -69,6 +70,7 @@ def create_job(
         date_to=date_to,
         status="queued",
         requested_by=requested_by,
+        max_scenes=max_scenes,
         snapshot={},
     )
     session.add(job)
@@ -233,6 +235,20 @@ def job_view(session: Session, job: Job, *, settings: Settings | None = None) ->
             job.status = "failed"
             job.error = job.error or "ingestion task failed; see worker logs"
             job.finished_at = job.finished_at or datetime.now(UTC)
+        elif job.max_scenes is not None and state == "SUCCESS":
+            # A capped quick-fetch deliberately stops after `max_scenes`
+            # usable scenes, not every usable scene in the window -- so
+            # "every stage reached 100%" (the branch below) may never be
+            # true for it. The Celery task succeeding IS the completion
+            # signal here; without this, a capped job sat at status=running
+            # forever even though nothing was left for it to do.
+            job.status = "done"
+            job.finished_at = job.finished_at or datetime.now(UTC)
+            if ingest_failed and not job.error:
+                job.error = (
+                    f"{ingest_failed} of {usable} scene(s) could not be read "
+                    "(data gap at the source); the rest completed normally."
+                )
         elif usable and current is None:
             job.status = "done"
             job.finished_at = job.finished_at or datetime.now(UTC)

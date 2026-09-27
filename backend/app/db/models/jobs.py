@@ -44,6 +44,11 @@ class Job(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, default="queued", index=True)
     celery_task_id: Mapped[str | None] = mapped_column(Text)
     requested_by: Mapped[str | None] = mapped_column(Text)
+    # Set only for a quick-fetch (stops after N usable scenes, not every usable
+    # scene in the window) -- job_view uses this to know "done" means "the
+    # capped Celery task succeeded", not "every usable scene in the window
+    # reached every stage", which a capped run will never satisfy.
+    max_scenes: Mapped[int | None] = mapped_column(Integer)
     error: Mapped[str | None] = mapped_column(Text)
     # last derived snapshot, for the list endpoint
     snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)

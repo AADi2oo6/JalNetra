@@ -177,19 +177,33 @@ def ingest_water_body(
     source: STACSource | None = None,
     settings: Settings | None = None,
     max_usable_scenes: int | None = None,
+    max_cloud_pct: float | None = None,
 ) -> IngestResult:
     """Search [day, date_to or day] and ingest every usable scene not yet cached.
 
     ``max_usable_scenes`` stops once that many usable scenes have been handled
     (ingested or already-cached) -- a quick-look fetch that wants the latest
     pass without waiting on the rest of the window. Left ``None`` (every other
-    caller), the whole window is processed, unchanged."""
+    caller), the whole window is processed, unchanged.
+
+    ``max_cloud_pct`` overrides ``Settings.stac_max_cloud_pct`` (default 60%)
+    for this call only -- a quick-fetch over a short window would otherwise
+    often find real scenes that are simply cloudier than the baseline-quality
+    threshold and report "0 scenes" even though a pass exists. Full runs and
+    backfills leave this unset, since baseline quality is exactly the thing
+    that threshold protects."""
     settings = settings or get_settings()
     source = source or build_source(settings)
     result = IngestResult(water_body_id=water_body_id)
     wb = _get_water_body(session, water_body_id)
     scenes = search_scenes(
-        session, water_body_id, day, date_to or day, source=source, settings=settings
+        session,
+        water_body_id,
+        day,
+        date_to or day,
+        source=source,
+        settings=settings,
+        max_cloud_pct=max_cloud_pct,
     )
     result.scenes_found = len(scenes)
     # A quick-look fetch wants the latest usable pass, not the oldest one in

@@ -57,17 +57,21 @@ async def create_ingest_job(
         await session.commit()
         return JobOut.model_validate(view)
     requested_by = actor.label(body.requested_by)
+    job_kind = (
+        "backfill" if (date_to - body.date_from).days > q.BACKFILL_THRESHOLD_DAYS else "ingest"
+    )
     try:
         job = await session.run_sync(
             lambda s: q.create_job(
                 s,
-                kind="backfill"
-                if (date_to - body.date_from).days > q.BACKFILL_THRESHOLD_DAYS
-                else "ingest",
+                kind=job_kind,
                 water_body_id=body.water_body_id,
                 date_from=body.date_from,
                 date_to=date_to,
                 requested_by=requested_by,
+                # backfill's chunked task doesn't accept/use max_scenes -- only
+                # a plain "ingest" job can be a capped quick-fetch.
+                max_scenes=body.max_scenes if job_kind == "ingest" else None,
             )
         )
     except LookupError as exc:
@@ -84,6 +88,7 @@ async def create_ingest_job(
             body.date_from.isoformat(),
             date_to.isoformat(),
             max_scenes=body.max_scenes,
+            max_cloud_pct=body.max_cloud_pct,
         )
     job.celery_task_id = result.id
     view = await session.run_sync(lambda s: q.job_view(s, job))

@@ -5,11 +5,19 @@ import { Button } from "@/components/ui/button";
 import { useToasts } from "@/store/toast";
 import { useUi } from "@/store/ui";
 
-// A quick-look fetch: the last 5 days (Sentinel-2's own revisit cadence, so
-// this is usually exactly one pass) and the backend stops after the first
-// usable scene it finds -- real work, just scoped down, not a fake result.
-const QUICK_FETCH_WINDOW_DAYS = 5;
+// A quick-look fetch, not a fake result -- real work, just scoped down:
+// - 35 days: a 5-day window (~1 Sentinel-2 revisit) too often finds nothing
+//   at all over India, especially in the monsoon; 35 days is wide enough to
+//   almost always contain at least one pass without becoming a backfill
+//   (still well under the 62-day chunked-backfill threshold).
+// - a relaxed cloud threshold: the default 60% "usable" cutoff exists to
+//   protect baseline quality over months of history, not a single quick
+//   look -- without relaxing it, a real scene found within the window can
+//   still be skipped as "too cloudy" and the fetch reports 0 scenes even
+//   though one exists.
+const QUICK_FETCH_WINDOW_DAYS = 35;
 const QUICK_FETCH_MAX_SCENES = 1;
+const QUICK_FETCH_MAX_CLOUD_PCT = 95;
 
 /**
  * One-click "fetch satellite data" for a lake that has no processed scenes
@@ -44,8 +52,9 @@ export function FetchSatelliteButton({
         date_to: to,
         requested_by: "fetch-satellite-button",
         // Not yet in the generated OpenAPI types (frontend/openapi.json is
-        // stale relative to the backend); the backend field is real.
+        // stale relative to the backend); the backend fields are real.
         max_scenes: QUICK_FETCH_MAX_SCENES,
+        max_cloud_pct: QUICK_FETCH_MAX_CLOUD_PCT,
       } as Parameters<typeof start.mutate>[0],
       {
         onSuccess: (j) => {
@@ -64,7 +73,7 @@ export function FetchSatelliteButton({
       disabled={start.isPending}
       onClick={fetchData}
       className={className}
-      title={`Fetch the latest Sentinel-2 pass for ${lakeName} (last ${QUICK_FETCH_WINDOW_DAYS} days)`}
+      title={`Fetch the latest available Sentinel-2 pass for ${lakeName} (last ${QUICK_FETCH_WINDOW_DAYS} days)`}
     >
       <Satellite className="h-3.5 w-3.5" />
       {start.isPending ? "Starting…" : "Fetch satellite data"}

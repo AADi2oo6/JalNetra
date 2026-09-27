@@ -39,6 +39,20 @@ def _headers() -> dict[str, str]:
     return {"X-API-Key": API_KEY} if API_KEY else {}
 
 
+# One pooled client for the process instead of a new TCP connection per call --
+# a real (if modest, since this is all localhost) latency win, and the honest
+# version of "speed up the HTTP calls": see the module docstring addendum
+# below for why this stays HTTP-to-the-API rather than raw DB/GEE access.
+_client: httpx.AsyncClient | None = None
+
+
+def _http() -> httpx.AsyncClient:
+    global _client
+    if _client is None:
+        _client = httpx.AsyncClient(base_url=API_BASE_URL, timeout=_TIMEOUT_S)
+    return _client
+
+
 # Connection-level hiccups only -- an HTTP error status (raise_for_status)
 # means the request was answered and retrying would just hit it again. The
 # discovery endpoint in particular calls out to Nominatim/Overpass, both
@@ -54,20 +68,35 @@ _retry = retry(
 
 @_retry
 async def _get(path: str, params: dict[str, Any] | None = None) -> Any:
-    async with httpx.AsyncClient(base_url=API_BASE_URL, timeout=_TIMEOUT_S) as client:
-        r = await client.get(path, params=params)
-        r.raise_for_status()
-        return r.json()
+    r = await _http().get(path, params=params)
+    r.raise_for_status()
+    return r.json()
 
 
 @_retry
 async def _post(path: str, body: dict[str, Any]) -> Any:
-    async with httpx.AsyncClient(
-        base_url=API_BASE_URL, timeout=_TIMEOUT_S, headers=_headers()
-    ) as client:
-        r = await client.post(path, json=body)
-        r.raise_for_status()
-        return r.json()
+    r = await _http().post(path, json=body, headers=_headers())
+    r.raise_for_status()
+    return r.json()
+
+
+async def fetch_thumbnail_bytes(water_body_id: str, observed_on: str) -> bytes | None:
+    """Raw PNG bytes for a lake's true-colour Sentinel-2 thumbnail on a date,
+    fetched from this same machine (reachable) rather than handed to Telegram
+    as a URL for its servers to fetch (which would only work if the API were
+    publicly reachable -- it isn't, in dev). ``None`` on any failure (GEE off,
+    no pass that day, network) so the caller can fall back to a text-only
+    reply instead of erroring out."""
+    try:
+        r = await _http().get(
+            "/imagery/thumbnail", params={"water_body_id": water_body_id, "date": observed_on}
+        )
+        if r.status_code >= 400:
+            return None
+        return r.content
+    except httpx.HTTPError as exc:
+        log.warning("thumbnail fetch failed", extra={"water_body_id": water_body_id, "error": str(exc)})
+        return None
 
 
 async def _find_water_body(name: str) -> dict[str, Any] | None:
@@ -156,6 +185,21 @@ async def get_lake_health(name: str) -> dict[str, Any]:
     wb = await _find_water_body(name)
     if wb is None:
         return {"error": f"No monitored water body matching {name!r}. Try /lakes to see what's tracked."}
+    return await _health_for(wb)
+
+
+async def get_lake_health_by_id(water_body_id: str) -> dict[str, Any]:
+    """Same as :func:`get_lake_health`, but for a caller (the /list and /saved
+    inline-keyboard buttons) that already has the exact id and shouldn't pay
+    for a name re-match."""
+    try:
+        wb = await _get(f"/water-bodies/{water_body_id}")
+    except httpx.HTTPError as exc:
+        return {"error": f"Could not load {water_body_id!r}: {exc}"}
+    return await _health_for(wb)
+
+
+async def _health_for(wb: dict[str, Any]) -> dict[str, Any]:
     wb_id = wb["id"]
     try:
         indicators, observations = await asyncio.gather(
@@ -243,7 +287,11 @@ async def get_active_alerts() -> dict[str, Any]:
 
 # --- Tool 4 -------------------------------------------------------------------------
 
-TRIGGER_SCAN_WINDOW_DAYS = 5  # same quick-fetch window as the dashboard's own button
+# Same quick-fetch window and relaxed cloud threshold as the dashboard's own
+# "Fetch satellite data" button (FetchSatelliteButton.tsx) -- 5 days and the
+# default 60% cloud cutoff too often found nothing at all over India.
+TRIGGER_SCAN_WINDOW_DAYS = 35
+TRIGGER_SCAN_MAX_CLOUD_PCT = 95
 
 
 async def trigger_scan(lake_name: str) -> dict[str, Any]:
@@ -262,6 +310,7 @@ async def trigger_scan(lake_name: str) -> dict[str, Any]:
                 "date_to": to.isoformat(),
                 "requested_by": "telegram-bot",
                 "max_scenes": 1,
+                "max_cloud_pct": TRIGGER_SCAN_MAX_CLOUD_PCT,
             },
         )
     except httpx.HTTPError as exc:
@@ -284,6 +333,14 @@ async def list_top_lakes(limit: int = 10) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = data.get("items", [])
     items.sort(key=lambda wb: (wb["open_alerts"] == 0, wb["tier"], wb["name"]))
     return items[:limit]
+
+
+async def list_wishlist() -> list[dict[str, Any]]:
+    """The dashboard's saved-water-bodies list (one shared wishlist -- the app
+    has no per-user accounts), for the bot's /saved command and the "View
+    Wishlist" inline button."""
+    data = await _get("/wishlist")
+    return data.get("items", [])
 
 
 # --- OpenAI tool schemas + dispatch table --------------------------------------------

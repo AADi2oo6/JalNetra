@@ -25,6 +25,16 @@ class IngestJobRequest(BaseModel):
             "omitted or null processes every usable scene in the window, as before"
         ),
     )
+    max_cloud_pct: float | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description=(
+            "relax the usable-scene cloud threshold for this run only (a quick-fetch "
+            "window is often too short to find a scene under the default 60%); "
+            "omitted keeps Settings.stac_max_cloud_pct, as every backfill/full run should"
+        ),
+    )
 
     model_config = ConfigDict(
         json_schema_extra={

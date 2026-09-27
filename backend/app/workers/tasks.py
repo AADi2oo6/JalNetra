@@ -76,6 +76,7 @@ def ingest_water_body(
     day: str,
     date_to: str | None = None,
     max_scenes: int | None = None,
+    max_cloud_pct: float | None = None,
 ) -> dict[str, Any]:
     """Search and cache every usable scene for a water body on `day` (ISO date).
     Idempotent: scenes already cached are reported as skipped, not re-read.
@@ -83,7 +84,8 @@ def ingest_water_body(
     ``max_scenes`` stops after that many usable scenes -- a quick-look fetch
     triggered from the dashboard's "Fetch satellite data" button, which wants
     the latest pass fast rather than a full historical backfill; omitted, the
-    whole window is processed exactly as before."""
+    whole window is processed exactly as before. ``max_cloud_pct`` relaxes the
+    usable-scene cloud threshold for that same quick-look case."""
     log.info(
         "ingest start",
         extra={"water_body_id": water_body_id, "day": day, "attempt": self.request.retries},
@@ -96,6 +98,7 @@ def ingest_water_body(
             date.fromisoformat(day),
             date_to=date.fromisoformat(date_to) if date_to else None,
             max_usable_scenes=max_scenes,
+            max_cloud_pct=max_cloud_pct,
         )
         session.commit()
         # Hand cached scenes to L4/L5. `skipped` scenes may have been cached by an
